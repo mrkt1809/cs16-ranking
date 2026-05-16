@@ -1234,6 +1234,11 @@ function initFirebase() {
     startConnectionWatchdog();
     firebaseInitDone = true;
 
+    // ── IMMEDIATE REST FETCH (works even if WebSocket blocked) ──
+    // This is the most reliable way to get data on iOS Safari.
+    // Fires in parallel with SDK WebSocket connection attempt.
+    fetchViaREST('init');
+
     // ── AGGRESSIVE EARLY RECONNECT KICKS ──
     // Mobile browsers (especially iOS Safari) often fail initial WebSocket
     // handshake. setInterval gets throttled in background; setTimeout doesn't
@@ -1242,6 +1247,14 @@ function initFirebase() {
     setTimeout(() => kickIfStuck('2.5s'),  2500);
     setTimeout(() => kickIfStuck('5s'),    5000);
     setTimeout(() => kickIfStuck('9s'),    9000);
+
+    // ── ACTIVE CONNECTION TESTS ──
+    // Don't rely solely on .info/connected listener (unreliable on iOS).
+    // Actively do a small once-read to detect if connection works.
+    setTimeout(() => testConnectionRead('1.5s'), 1500);
+    setTimeout(() => testConnectionRead('4s'),   4000);
+    setTimeout(() => testConnectionRead('8s'),   8000);
+    setTimeout(() => testConnectionRead('15s'), 15000);
 
     // ── USER GESTURE FALLBACK (CRITICAL FOR iOS SAFARI) ──
     // iOS Safari blocks WebSocket negotiation after page reload until first user
@@ -1256,6 +1269,16 @@ function initFirebase() {
         showToast('💡 Chạm màn hình để hoàn tất kết nối Firebase', false);
       }
     }, 4000);
+
+    // ── REST POLLING FALLBACK ──
+    // If SDK WebSocket still not connected after 8s (iOS Safari issue),
+    // start REST API polling so data still syncs (just not real-time).
+    setTimeout(() => {
+      if (!firebaseConnected) {
+        console.log('[Firebase] WebSocket SDK failed after 8s — activating REST polling fallback');
+        startRESTPolling();
+      }
+    }, 8000);
   } catch (e) {
     console.error('[Firebase] Init failed:', e);
     updateSyncBadge('offline');
@@ -1271,25 +1294,129 @@ function setupFirebaseListeners() {
     firebaseDB.ref(FB_PATH).off();
   } catch(e) {}
 
-  // Connection state listener
+  // Connection state listener (.info/connected) — primary signal
   firebaseDB.ref('.info/connected').on('value', snap => {
     firebaseConnected = (snap.val() === true);
     if (firebaseConnected) {
-      console.log('[Firebase] ✓ Connected to RTDB');
+      console.log('[Firebase] ✓ Connected via .info/connected');
       updateSyncBadge('synced');
+      stopRESTPolling();
     } else {
-      console.log('[Firebase] ✗ Not connected');
+      console.log('[Firebase] ✗ .info/connected says false');
       updateSyncBadge();   // show "connecting" rather than "offline" immediately
     }
   });
 
-  // Data listener
+  // Data listener — also serves as fallback connection indicator.
+  // On iOS Safari, .info/connected sometimes doesn't fire after refresh, but
+  // data listener still works. If data arrives, we KNOW we're connected.
   firebaseDB.ref(FB_PATH).on('value', snap => {
+    if (!firebaseConnected) {
+      console.log('[Firebase] ✓ Connected (inferred from data sync)');
+      firebaseConnected = true;
+      updateSyncBadge('synced');
+      stopRESTPolling();
+    }
     handleRemoteSnapshot(snap.val());
   }, err => {
     console.error('[Firebase] Listen error:', err);
     updateSyncBadge('offline');
   });
+}
+
+// Test-read fallback: actively verify connection by doing a small once-read.
+// This works even when .info/connected listener is silent (iOS Safari quirk).
+function testConnectionRead(reason) {
+  if (firebaseConnected || !firebaseDB) return;
+  console.log(`[Firebase] Active connection test: ${reason}`);
+  const t = setTimeout(() => {
+    console.log(`[Firebase] Test read ${reason}: timed out`);
+  }, 4000);
+  firebaseDB.ref('.info/serverTimeOffset').once('value')
+    .then(snap => {
+      clearTimeout(t);
+      if (typeof snap.val() === 'number' && !firebaseConnected) {
+        console.log(`[Firebase] ✓ Connected (test read ${reason} succeeded, offset=${snap.val()})`);
+        firebaseConnected = true;
+        updateSyncBadge('synced');
+        stopRESTPolling();
+      }
+    })
+    .catch(err => {
+      clearTimeout(t);
+      console.log(`[Firebase] Test read ${reason} failed:`, err.message);
+    });
+}
+
+// ═════════════════════════════════════════════════════════════════════
+// REST API FALLBACK — works when WebSocket is blocked (iOS Safari)
+// ═════════════════════════════════════════════════════════════════════
+let restPollInterval = null;
+const REST_POLL_INTERVAL_MS = 12000;
+let restWritePending = false;
+
+async function fetchViaREST(reason) {
+  const url = firebaseConfig.databaseURL + '/' + FB_PATH + '.json?_t=' + Date.now();
+  console.log(`[REST] GET (${reason})...`);
+  try {
+    const t0 = Date.now();
+    const res = await fetch(url, { method: 'GET', cache: 'no-store' });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+    console.log(`[REST] ✓ GET success (${reason}) in ${Date.now()-t0}ms`);
+    handleRemoteSnapshot(data);
+    if (!firebaseConnected) {
+      firebaseConnected = true;
+      updateSyncBadge('synced');
+    }
+    return true;
+  } catch (e) {
+    console.error(`[REST] GET failed (${reason}):`, e.message);
+    return false;
+  }
+}
+
+async function pushViaREST(dataToSync) {
+  if (restWritePending) {
+    console.log('[REST] Write already in-flight, skipping');
+    return false;
+  }
+  restWritePending = true;
+  const url = firebaseConfig.databaseURL + '/' + FB_PATH + '.json';
+  try {
+    console.log('[REST] PUT writing data...');
+    const res = await fetch(url, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(dataToSync)
+    });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    console.log('[REST] ✓ PUT successful');
+    return true;
+  } catch (e) {
+    console.error('[REST] PUT failed:', e.message);
+    return false;
+  } finally {
+    restWritePending = false;
+  }
+}
+
+function startRESTPolling() {
+  if (restPollInterval) return;
+  console.log(`[REST] Starting polling fallback (every ${REST_POLL_INTERVAL_MS/1000}s)`);
+  restPollInterval = setInterval(() => {
+    if (document.visibilityState === 'visible' && !firebaseConnected) {
+      fetchViaREST('poll');
+    }
+  }, REST_POLL_INTERVAL_MS);
+}
+
+function stopRESTPolling() {
+  if (restPollInterval) {
+    clearInterval(restPollInterval);
+    restPollInterval = null;
+    console.log('[REST] Stopped polling (SDK is now connected)');
+  }
 }
 
 function startConnectionWatchdog() {
@@ -1466,20 +1593,31 @@ function reloadManageNow() {
 }
 
 function pushToFirebase() {
-  if (!firebaseEnabled || !firebaseDB) return;
+  if (!firebaseEnabled) return;
   if (isApplyingRemoteUpdate) return;
   // Don't sync local-only fields
   const dataToSync = { ...state };
   delete dataToSync.draft;
   delete dataToSync.editingMatchIndex;
+
   updateSyncBadge('saving');
-  firebaseDB.ref(FB_PATH).set(dataToSync)
-    .then(() => updateSyncBadge('synced'))
-    .catch(err => {
-      console.error('[Firebase] Write failed:', err);
-      updateSyncBadge('offline');
-      showToast('⚠ Sync lỗi: ' + err.message, true);
+
+  // Prefer SDK if connected (real-time push to other clients)
+  if (firebaseDB && firebaseConnected) {
+    firebaseDB.ref(FB_PATH).set(dataToSync)
+      .then(() => updateSyncBadge('synced'))
+      .catch(err => {
+        console.error('[Firebase] SDK write failed, falling back to REST:', err);
+        pushViaREST(dataToSync).then(ok => {
+          updateSyncBadge(ok ? 'synced' : 'offline');
+        });
+      });
+  } else {
+    // SDK not connected — use REST directly
+    pushViaREST(dataToSync).then(ok => {
+      updateSyncBadge(ok ? 'synced' : 'offline');
     });
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────
