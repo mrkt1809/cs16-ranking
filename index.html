@@ -86,12 +86,6 @@ header{text-align:center;padding:24px 16px 14px;border-bottom:1px solid var(--bo
 .sync-badge.offline .sync-dot{ background:var(--red);}
 @keyframes pulse{ 0%,100%{opacity:1;} 50%{opacity:0.4;} }
 @keyframes pulse-fast{ 0%,100%{opacity:1;} 50%{opacity:0.3;} }
-@keyframes attentionPulse{
-  0%, 100% { transform: scale(1); }
-  50% { transform: scale(1.06); box-shadow: 0 0 14px rgba(245,185,66,0.5); }
-}
-/* When stuck on connecting/offline, badge pulses to draw user attention */
-.sync-badge.needs-tap{ animation: attentionPulse 1.8s ease-in-out infinite; }
 
 /* TABS */
 .tabs{
@@ -1164,55 +1158,11 @@ function updateSyncBadge(status) {
   const badge = document.getElementById('sync-badge');
   const label = document.getElementById('sync-label');
   if (!badge || !label) return;
-  badge.classList.remove('synced','saving','offline','needs-tap');
+  badge.classList.remove('synced','saving','offline');
   if (status === 'synced')      { badge.classList.add('synced');  label.textContent = '✓ SYNCED'; }
   else if (status === 'saving') { badge.classList.add('saving');  label.textContent = '↑ SAVING'; }
-  else if (status === 'offline'){ badge.classList.add('offline','needs-tap'); label.textContent = '👆 TAP TO CONNECT'; }
+  else if (status === 'offline'){ badge.classList.add('offline'); label.textContent = '⚠ OFFLINE (tap)'; }
   else                          {                                 label.textContent = '...CONNECTING'; }
-}
-
-// Lightweight kick — used by early retry timers
-function kickIfStuck(reason) {
-  if (firebaseConnected) return;
-  if (!firebaseDB) return;
-  console.log(`[Firebase] Early kick attempt: ${reason}`);
-  try {
-    firebaseDB.goOffline();
-    setTimeout(() => {
-      try { firebaseDB.goOnline(); } catch(e) {}
-    }, 150);
-  } catch(e) {
-    console.error('[Firebase] Kick error:', e);
-  }
-}
-
-// ── USER GESTURE FALLBACK (the actual fix for iOS Safari refresh issue) ──
-// iOS Safari throttles WebSocket negotiation after refresh until user
-// interacts with the page. By hooking the first gesture of ANY kind, we
-// piggyback on the gesture context to establish connection.
-let userGestureKickDone = false;
-function setupUserGestureKick() {
-  if (userGestureKickDone) return;
-  const handler = () => {
-    if (userGestureKickDone) return;
-    if (firebaseConnected) {
-      userGestureKickDone = true;
-      return;
-    }
-    userGestureKickDone = true;
-    console.log('[Firebase] First user gesture detected — kicking connection under gesture context');
-    // Run directly here (not via setTimeout) to stay in gesture-handler scope
-    try {
-      if (firebaseDB) {
-        firebaseDB.goOffline();
-        firebaseDB.goOnline();
-      }
-    } catch(e) { console.error('[Firebase] Gesture kick failed:', e); }
-  };
-  // Listen for ANY type of user interaction. capture:true so we see it before app handlers.
-  ['touchstart', 'pointerdown', 'mousedown', 'click', 'scroll', 'keydown'].forEach(evt => {
-    window.addEventListener(evt, handler, { capture: true, passive: true });
-  });
 }
 
 function initFirebase() {
@@ -1233,52 +1183,6 @@ function initFirebase() {
     setupFirebaseListeners();
     startConnectionWatchdog();
     firebaseInitDone = true;
-
-    // ── IMMEDIATE REST FETCH (works even if WebSocket blocked) ──
-    // This is the most reliable way to get data on iOS Safari.
-    // Fires in parallel with SDK WebSocket connection attempt.
-    fetchViaREST('init');
-
-    // ── AGGRESSIVE EARLY RECONNECT KICKS ──
-    // Mobile browsers (especially iOS Safari) often fail initial WebSocket
-    // handshake. setInterval gets throttled in background; setTimeout doesn't
-    // get throttled as much. Schedule 4 retry attempts at increasing delays.
-    setTimeout(() => kickIfStuck('500ms'),  500);
-    setTimeout(() => kickIfStuck('2.5s'),  2500);
-    setTimeout(() => kickIfStuck('5s'),    5000);
-    setTimeout(() => kickIfStuck('9s'),    9000);
-
-    // ── ACTIVE CONNECTION TESTS ──
-    // Don't rely solely on .info/connected listener (unreliable on iOS).
-    // Actively do a small once-read to detect if connection works.
-    setTimeout(() => testConnectionRead('1.5s'), 1500);
-    setTimeout(() => testConnectionRead('4s'),   4000);
-    setTimeout(() => testConnectionRead('8s'),   8000);
-    setTimeout(() => testConnectionRead('15s'), 15000);
-
-    // ── USER GESTURE FALLBACK (CRITICAL FOR iOS SAFARI) ──
-    // iOS Safari blocks WebSocket negotiation after page reload until first user
-    // gesture. Timer-based reconnects don't work because they lack gesture context.
-    // Hook the very first user interaction (any kind) and use it to kick Firebase.
-    setupUserGestureKick();
-
-    // ── HELPFUL HINT ──
-    // If still not connected after 4s, show toast suggesting user to tap badge.
-    setTimeout(() => {
-      if (!firebaseConnected) {
-        showToast('💡 Chạm màn hình để hoàn tất kết nối Firebase', false);
-      }
-    }, 4000);
-
-    // ── REST POLLING FALLBACK ──
-    // If SDK WebSocket still not connected after 8s (iOS Safari issue),
-    // start REST API polling so data still syncs (just not real-time).
-    setTimeout(() => {
-      if (!firebaseConnected) {
-        console.log('[Firebase] WebSocket SDK failed after 8s — activating REST polling fallback');
-        startRESTPolling();
-      }
-    }, 8000);
   } catch (e) {
     console.error('[Firebase] Init failed:', e);
     updateSyncBadge('offline');
@@ -1294,129 +1198,25 @@ function setupFirebaseListeners() {
     firebaseDB.ref(FB_PATH).off();
   } catch(e) {}
 
-  // Connection state listener (.info/connected) — primary signal
+  // Connection state listener
   firebaseDB.ref('.info/connected').on('value', snap => {
     firebaseConnected = (snap.val() === true);
     if (firebaseConnected) {
-      console.log('[Firebase] ✓ Connected via .info/connected');
+      console.log('[Firebase] ✓ Connected to RTDB');
       updateSyncBadge('synced');
-      stopRESTPolling();
     } else {
-      console.log('[Firebase] ✗ .info/connected says false');
+      console.log('[Firebase] ✗ Not connected');
       updateSyncBadge();   // show "connecting" rather than "offline" immediately
     }
   });
 
-  // Data listener — also serves as fallback connection indicator.
-  // On iOS Safari, .info/connected sometimes doesn't fire after refresh, but
-  // data listener still works. If data arrives, we KNOW we're connected.
+  // Data listener
   firebaseDB.ref(FB_PATH).on('value', snap => {
-    if (!firebaseConnected) {
-      console.log('[Firebase] ✓ Connected (inferred from data sync)');
-      firebaseConnected = true;
-      updateSyncBadge('synced');
-      stopRESTPolling();
-    }
     handleRemoteSnapshot(snap.val());
   }, err => {
     console.error('[Firebase] Listen error:', err);
     updateSyncBadge('offline');
   });
-}
-
-// Test-read fallback: actively verify connection by doing a small once-read.
-// This works even when .info/connected listener is silent (iOS Safari quirk).
-function testConnectionRead(reason) {
-  if (firebaseConnected || !firebaseDB) return;
-  console.log(`[Firebase] Active connection test: ${reason}`);
-  const t = setTimeout(() => {
-    console.log(`[Firebase] Test read ${reason}: timed out`);
-  }, 4000);
-  firebaseDB.ref('.info/serverTimeOffset').once('value')
-    .then(snap => {
-      clearTimeout(t);
-      if (typeof snap.val() === 'number' && !firebaseConnected) {
-        console.log(`[Firebase] ✓ Connected (test read ${reason} succeeded, offset=${snap.val()})`);
-        firebaseConnected = true;
-        updateSyncBadge('synced');
-        stopRESTPolling();
-      }
-    })
-    .catch(err => {
-      clearTimeout(t);
-      console.log(`[Firebase] Test read ${reason} failed:`, err.message);
-    });
-}
-
-// ═════════════════════════════════════════════════════════════════════
-// REST API FALLBACK — works when WebSocket is blocked (iOS Safari)
-// ═════════════════════════════════════════════════════════════════════
-let restPollInterval = null;
-const REST_POLL_INTERVAL_MS = 12000;
-let restWritePending = false;
-
-async function fetchViaREST(reason) {
-  const url = firebaseConfig.databaseURL + '/' + FB_PATH + '.json?_t=' + Date.now();
-  console.log(`[REST] GET (${reason})...`);
-  try {
-    const t0 = Date.now();
-    const res = await fetch(url, { method: 'GET', cache: 'no-store' });
-    if (!res.ok) throw new Error('HTTP ' + res.status);
-    const data = await res.json();
-    console.log(`[REST] ✓ GET success (${reason}) in ${Date.now()-t0}ms`);
-    handleRemoteSnapshot(data);
-    if (!firebaseConnected) {
-      firebaseConnected = true;
-      updateSyncBadge('synced');
-    }
-    return true;
-  } catch (e) {
-    console.error(`[REST] GET failed (${reason}):`, e.message);
-    return false;
-  }
-}
-
-async function pushViaREST(dataToSync) {
-  if (restWritePending) {
-    console.log('[REST] Write already in-flight, skipping');
-    return false;
-  }
-  restWritePending = true;
-  const url = firebaseConfig.databaseURL + '/' + FB_PATH + '.json';
-  try {
-    console.log('[REST] PUT writing data...');
-    const res = await fetch(url, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(dataToSync)
-    });
-    if (!res.ok) throw new Error('HTTP ' + res.status);
-    console.log('[REST] ✓ PUT successful');
-    return true;
-  } catch (e) {
-    console.error('[REST] PUT failed:', e.message);
-    return false;
-  } finally {
-    restWritePending = false;
-  }
-}
-
-function startRESTPolling() {
-  if (restPollInterval) return;
-  console.log(`[REST] Starting polling fallback (every ${REST_POLL_INTERVAL_MS/1000}s)`);
-  restPollInterval = setInterval(() => {
-    if (document.visibilityState === 'visible' && !firebaseConnected) {
-      fetchViaREST('poll');
-    }
-  }, REST_POLL_INTERVAL_MS);
-}
-
-function stopRESTPolling() {
-  if (restPollInterval) {
-    clearInterval(restPollInterval);
-    restPollInterval = null;
-    console.log('[REST] Stopped polling (SDK is now connected)');
-  }
 }
 
 function startConnectionWatchdog() {
@@ -1550,7 +1350,8 @@ function applyRemoteState(remote) {
     state = remote;
     if (!state.auth) state.auth = { password: DEFAULT_ADMIN_PASSWORD };
     if (!state.matches) state.matches = [];
-    if (!state.players) state.players = {};
+    // Sanitize players (Firebase may have null entries from deletions)
+    state.players = sanitizePlayers(state.players);
 
     // Restore local-only fields
     if (localDraft != null) state.draft = localDraft;
@@ -1593,31 +1394,20 @@ function reloadManageNow() {
 }
 
 function pushToFirebase() {
-  if (!firebaseEnabled) return;
+  if (!firebaseEnabled || !firebaseDB) return;
   if (isApplyingRemoteUpdate) return;
   // Don't sync local-only fields
   const dataToSync = { ...state };
   delete dataToSync.draft;
   delete dataToSync.editingMatchIndex;
-
   updateSyncBadge('saving');
-
-  // Prefer SDK if connected (real-time push to other clients)
-  if (firebaseDB && firebaseConnected) {
-    firebaseDB.ref(FB_PATH).set(dataToSync)
-      .then(() => updateSyncBadge('synced'))
-      .catch(err => {
-        console.error('[Firebase] SDK write failed, falling back to REST:', err);
-        pushViaREST(dataToSync).then(ok => {
-          updateSyncBadge(ok ? 'synced' : 'offline');
-        });
-      });
-  } else {
-    // SDK not connected — use REST directly
-    pushViaREST(dataToSync).then(ok => {
-      updateSyncBadge(ok ? 'synced' : 'offline');
+  firebaseDB.ref(FB_PATH).set(dataToSync)
+    .then(() => updateSyncBadge('synced'))
+    .catch(err => {
+      console.error('[Firebase] Write failed:', err);
+      updateSyncBadge('offline');
+      showToast('⚠ Sync lỗi: ' + err.message, true);
     });
-  }
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -1675,16 +1465,54 @@ function initPlayers() {
   });
   return p;
 }
+
+// Sanitize players: fixes the Firebase quirk where deleting a player creates
+// gaps in numeric keys, causing Firebase to return null entries.
+// Without this, renderLeaderboard()'s sort crashes with "null is not an object".
+function sanitizePlayers(playersIn) {
+  if (!playersIn) return {};
+  const result = {};
+  // Firebase may return either object or array (when keys look array-like)
+  const entries = Array.isArray(playersIn)
+    ? playersIn.map((p, i) => [String(i), p])
+    : Object.entries(playersIn);
+  for (const [key, p] of entries) {
+    if (!p || typeof p !== 'object') continue;
+    const id = (p.id != null && Number.isFinite(Number(p.id))) ? Number(p.id) : Number(key);
+    if (!Number.isFinite(id)) continue;
+    result[id] = {
+      id: id,
+      name: typeof p.name === 'string' && p.name.trim() ? p.name : `Player ${id}`,
+      tier: (p.tier != null && [1,2,3,4].includes(Number(p.tier))) ? Number(p.tier) : null,
+      tanker: !!p.tanker,
+      points: typeof p.points === 'number' ? p.points : 0,
+      wins: typeof p.wins === 'number' ? p.wins : 0,
+      losses: typeof p.losses === 'number' ? p.losses : 0,
+      kills: typeof p.kills === 'number' ? p.kills : 0,
+      matches: typeof p.matches === 'number' ? p.matches : 0,
+      prevTier: (p.prevTier != null && [1,2,3,4].includes(Number(p.prevTier))) ? Number(p.prevTier) : null,
+    };
+  }
+  return result;
+}
 function loadState() {
   try {
     const raw = localStorage.getItem('cs16_v4');
     if (raw) {
       const s = JSON.parse(raw);
-      // Ensure auth section exists for older saves
       if (!s.auth) s.auth = { password: DEFAULT_ADMIN_PASSWORD };
+      // Sanitize players to prevent null-entry crashes
+      s.players = sanitizePlayers(s.players);
+      if (Object.keys(s.players).length === 0) {
+        console.warn('[State] Players wiped by sanitize, restoring defaults');
+        s.players = initPlayers();
+      }
+      if (!Array.isArray(s.matches)) s.matches = [];
       return s;
     }
-  } catch(e) {}
+  } catch(e) {
+    console.error('[State] loadState failed:', e);
+  }
   return {
     players: initPlayers(),
     matches: [],
@@ -1837,7 +1665,8 @@ function closeAuthIfBackdrop(e) {
 //  TIER / RANKING
 // ─────────────────────────────────────────────────────────────────────
 function recomputeTiers() {
-  const participants = Object.values(state.players).filter(p => p.matches > 0);
+  const participants = Object.values(state.players)
+    .filter(p => p && typeof p === 'object' && p.matches > 0);
   participants.sort((a,b) => b.points - a.points);
   const n = participants.length;
   if (n === 0) return;
@@ -1884,7 +1713,9 @@ function getBadge(pts) {
 //  LEADERBOARD
 // ─────────────────────────────────────────────────────────────────────
 function renderLeaderboard() {
-  const sorted = Object.values(state.players).sort((a,b) => b.points - a.points);
+  const sorted = Object.values(state.players)
+    .filter(p => p && typeof p === 'object' && typeof p.points === 'number')
+    .sort((a,b) => b.points - a.points);
   document.getElementById('leaderboard').innerHTML = sorted.map((p,i) => {
     const rank = i+1;
     const badge = getBadge(p.points);
@@ -2029,7 +1860,9 @@ function updateSavedLineupInfo() {
 }
 
 function renderRosters() {
-  const players = Object.values(state.players).sort((a,b)=>a.name.localeCompare(b.name,'vi'));
+  const players = Object.values(state.players)
+    .filter(p => p && typeof p === 'object' && p.name)
+    .sort((a,b)=>a.name.localeCompare(b.name,'vi'));
   ['a','b'].forEach(tm => {
     const otherSet = tm==='a' ? selB : selA;
     document.getElementById(`roster-${tm}`).innerHTML = players.map(p => {
@@ -3142,7 +2975,9 @@ function renderTeamSplit() {
 }
 
 function renderTSRoster() {
-  const players = Object.values(state.players).sort((a,b)=>a.name.localeCompare(b.name,'vi'));
+  const players = Object.values(state.players)
+    .filter(p => p && typeof p === 'object' && p.name)
+    .sort((a,b)=>a.name.localeCompare(b.name,'vi'));
   const grid = document.getElementById('ts-roster');
   grid.innerHTML = players.map(p => {
     const sel = participantSet.has(p.id);
@@ -3304,7 +3139,9 @@ function applyDistribution() {
 //  MANAGE PAGE (with inline name editing)
 // ─────────────────────────────────────────────────────────────────────
 function renderManage() {
-  const sorted = Object.values(state.players).sort((a,b)=>a.id - b.id);
+  const sorted = Object.values(state.players)
+    .filter(p => p && typeof p === 'object')
+    .sort((a,b)=>a.id - b.id);
   const list = document.getElementById('manage-list');
   list.innerHTML = `
     <div class="manage-header">
