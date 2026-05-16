@@ -1161,8 +1161,23 @@ function updateSyncBadge(status) {
   badge.classList.remove('synced','saving','offline');
   if (status === 'synced')      { badge.classList.add('synced');  label.textContent = '✓ SYNCED'; }
   else if (status === 'saving') { badge.classList.add('saving');  label.textContent = '↑ SAVING'; }
-  else if (status === 'offline'){ badge.classList.add('offline'); label.textContent = '⚠ OFFLINE (tap)'; }
+  else if (status === 'offline'){ badge.classList.add('offline'); label.textContent = '👆 TAP TO CONNECT'; }
   else                          {                                 label.textContent = '...CONNECTING'; }
+}
+
+// Lightweight kick — used by early retry timers
+function kickIfStuck(reason) {
+  if (firebaseConnected) return;
+  if (!firebaseDB) return;
+  console.log(`[Firebase] Early kick attempt: ${reason}`);
+  try {
+    firebaseDB.goOffline();
+    setTimeout(() => {
+      try { firebaseDB.goOnline(); } catch(e) {}
+    }, 150);
+  } catch(e) {
+    console.error('[Firebase] Kick error:', e);
+  }
 }
 
 function initFirebase() {
@@ -1183,6 +1198,15 @@ function initFirebase() {
     setupFirebaseListeners();
     startConnectionWatchdog();
     firebaseInitDone = true;
+
+    // ── AGGRESSIVE EARLY RECONNECT KICKS ──
+    // Mobile browsers (especially iOS Safari) often fail initial WebSocket
+    // handshake. setInterval gets throttled in background; setTimeout doesn't
+    // get throttled as much. Schedule 4 retry attempts at increasing delays.
+    setTimeout(() => kickIfStuck('500ms'),  500);
+    setTimeout(() => kickIfStuck('2.5s'),  2500);
+    setTimeout(() => kickIfStuck('5s'),    5000);
+    setTimeout(() => kickIfStuck('9s'),    9000);
   } catch (e) {
     console.error('[Firebase] Init failed:', e);
     updateSyncBadge('offline');
