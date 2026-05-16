@@ -1360,6 +1360,11 @@ function applyRemoteState(remote) {
     // Cache to localStorage (so offline reads work)
     localStorage.setItem('cs16_v4', JSON.stringify(state));
 
+    // CRITICAL: always re-render leaderboard explicitly after remote update.
+    // Don't rely solely on rerenderActivePageAfterSync — on mobile Safari,
+    // querySelector('.tab.active') sometimes misses timing, causing the
+    // leaderboard to not refresh until user manually switches tabs.
+    renderLeaderboard();
     rerenderActivePageAfterSync();
   } finally {
     isApplyingRemoteUpdate = false;
@@ -1369,8 +1374,8 @@ function applyRemoteState(remote) {
 function rerenderActivePageAfterSync() {
   const tab = document.querySelector('.tab.active')?.dataset.tab;
   if (!tab) return;
-  if (tab === 'leaderboard')      renderLeaderboard();
-  else if (tab === 'history')     renderHistory();
+  // Note: leaderboard re-rendered explicitly in applyRemoteState — no need here
+  if (tab === 'history')          renderHistory();
   else if (tab === 'teamsplit')   renderTSRoster(); // safe: participantSet is local
   else if (tab === 'log')         { /* form state is local — only roster names might be stale; skip */ }
   else if (tab === 'manage')      {
