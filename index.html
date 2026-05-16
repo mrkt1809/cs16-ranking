@@ -68,7 +68,10 @@ header{text-align:center;padding:24px 16px 14px;border-bottom:1px solid var(--bo
   font-weight:700; color:var(--dim);
   transition:all .3s;
   user-select:none;
+  cursor:pointer;
 }
+.sync-badge:hover{ filter:brightness(1.15); }
+.sync-badge:active{ transform:scale(0.93); }
 .sync-badge .sync-dot{
   width:7px; height:7px; border-radius:50%;
   background:var(--dim);
@@ -711,7 +714,7 @@ header{text-align:center;padding:24px 16px 14px;border-bottom:1px solid var(--bo
     <span class="auth-dot"></span>
     <span id="auth-label">PLAYER</span>
   </div>
-  <div class="sync-badge" id="sync-badge" title="Trạng thái sync với Firebase">
+  <div class="sync-badge" id="sync-badge" title="Click để kết nối lại Firebase" onclick="reconnectFirebase()">
     <span class="sync-dot"></span>
     <span id="sync-label">CONNECTING</span>
   </div>
@@ -1146,6 +1149,11 @@ let isApplyingRemoteUpdate = false;
 let firebaseInitDone = false;
 let pendingFirstSnapshot = true;  // True on the very first remote snapshot only
 
+// Watchdog state
+let connectionWatchdog = null;
+let watchdogStartTime = 0;
+let lastReconnectTime = 0;
+
 function updateSyncBadge(status) {
   const badge = document.getElementById('sync-badge');
   const label = document.getElementById('sync-label');
@@ -1153,7 +1161,7 @@ function updateSyncBadge(status) {
   badge.classList.remove('synced','saving','offline');
   if (status === 'synced')      { badge.classList.add('synced');  label.textContent = '✓ SYNCED'; }
   else if (status === 'saving') { badge.classList.add('saving');  label.textContent = '↑ SAVING'; }
-  else if (status === 'offline'){ badge.classList.add('offline'); label.textContent = '⚠ OFFLINE'; }
+  else if (status === 'offline'){ badge.classList.add('offline'); label.textContent = '⚠ OFFLINE (tap)'; }
   else                          {                                 label.textContent = '...CONNECTING'; }
 }
 
@@ -1164,24 +1172,16 @@ function initFirebase() {
     return;
   }
   try {
-    firebase.initializeApp(firebaseConfig);
+    // Avoid "already initialized" error (occurs on BFCache restore on iOS Safari)
+    if (!firebase.apps.length) {
+      firebase.initializeApp(firebaseConfig);
+      console.log('[Firebase] App initialized fresh');
+    } else {
+      console.log('[Firebase] App already initialized, reusing instance');
+    }
     firebaseDB = firebase.database();
-
-    // Connection state listener
-    firebaseDB.ref('.info/connected').on('value', snap => {
-      firebaseConnected = (snap.val() === true);
-      updateSyncBadge(firebaseConnected ? 'synced' : 'offline');
-    });
-
-    // Data listener — triggers on every remote change (real-time sync)
-    firebaseDB.ref(FB_PATH).on('value', snap => {
-      const remote = snap.val();
-      handleRemoteSnapshot(remote);
-    }, err => {
-      console.error('[Firebase] Listen error:', err);
-      updateSyncBadge('offline');
-      showToast('Lỗi sync Firebase: ' + err.message, true);
-    });
+    setupFirebaseListeners();
+    startConnectionWatchdog();
     firebaseInitDone = true;
   } catch (e) {
     console.error('[Firebase] Init failed:', e);
@@ -1189,6 +1189,135 @@ function initFirebase() {
     firebaseEnabled = false;
   }
 }
+
+function setupFirebaseListeners() {
+  if (!firebaseDB) return;
+  // Detach any pre-existing listeners first to avoid duplicates after reconnect
+  try {
+    firebaseDB.ref('.info/connected').off();
+    firebaseDB.ref(FB_PATH).off();
+  } catch(e) {}
+
+  // Connection state listener
+  firebaseDB.ref('.info/connected').on('value', snap => {
+    firebaseConnected = (snap.val() === true);
+    if (firebaseConnected) {
+      console.log('[Firebase] ✓ Connected to RTDB');
+      updateSyncBadge('synced');
+    } else {
+      console.log('[Firebase] ✗ Not connected');
+      updateSyncBadge();   // show "connecting" rather than "offline" immediately
+    }
+  });
+
+  // Data listener
+  firebaseDB.ref(FB_PATH).on('value', snap => {
+    handleRemoteSnapshot(snap.val());
+  }, err => {
+    console.error('[Firebase] Listen error:', err);
+    updateSyncBadge('offline');
+  });
+}
+
+function startConnectionWatchdog() {
+  if (connectionWatchdog) clearInterval(connectionWatchdog);
+  watchdogStartTime = Date.now();
+
+  connectionWatchdog = setInterval(() => {
+    if (firebaseConnected) {
+      watchdogStartTime = Date.now();   // reset
+      return;
+    }
+    const stuckSecs = Math.floor((Date.now() - watchdogStartTime) / 1000);
+
+    // After 8s stuck, force reconnect (but only once every 15s to avoid loop)
+    if (stuckSecs >= 8 && (Date.now() - lastReconnectTime) > 15000) {
+      console.log(`[Firebase] Watchdog: stuck ${stuckSecs}s, auto-reconnecting`);
+      forceReconnect(false);  // silent
+    }
+    // After 25s, show OFFLINE state for user to manually retry
+    else if (stuckSecs >= 25) {
+      updateSyncBadge('offline');
+    }
+  }, 2000);
+}
+
+function forceReconnect(showToastMsg) {
+  lastReconnectTime = Date.now();
+  watchdogStartTime = Date.now();
+  updateSyncBadge();   // reset to "connecting"
+
+  if (!firebaseEnabled || typeof firebase === 'undefined') {
+    console.warn('[Firebase] Cannot reconnect: SDK unavailable');
+    updateSyncBadge('offline');
+    return;
+  }
+
+  // Re-init DB instance if needed
+  if (!firebaseDB) {
+    try {
+      if (!firebase.apps.length) firebase.initializeApp(firebaseConfig);
+      firebaseDB = firebase.database();
+      setupFirebaseListeners();
+      startConnectionWatchdog();
+    } catch (e) {
+      console.error('[Firebase] Re-init failed:', e);
+      updateSyncBadge('offline');
+      return;
+    }
+  }
+
+  // Force WebSocket recycle
+  try {
+    firebaseDB.goOffline();
+    setTimeout(() => {
+      try { firebaseDB.goOnline(); } catch(e) { console.error('[Firebase] goOnline failed:', e); }
+    }, 250);
+  } catch (e) {
+    console.error('[Firebase] goOffline failed:', e);
+  }
+
+  if (showToastMsg) showToast('🔄 Đang kết nối lại Firebase...');
+}
+
+// Click handler for sync badge — user-triggered reconnect
+function reconnectFirebase() {
+  forceReconnect(true);
+}
+
+// ── LIFECYCLE EVENT HANDLERS ─────────────────────────────────────────
+// 1. iOS Safari BFCache (Back-Forward Cache) — page restored from memory
+window.addEventListener('pageshow', (event) => {
+  if (event.persisted) {
+    console.log('[Firebase] Page restored from BFCache, forcing reconnect');
+    setTimeout(() => forceReconnect(false), 200);
+  }
+});
+
+// 2. Mobile browser tab visibility — tab woken up from background
+let visibilityTimeout = null;
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') {
+    if (visibilityTimeout) clearTimeout(visibilityTimeout);
+    // Debounce: only reconnect if still disconnected after 1.5s
+    visibilityTimeout = setTimeout(() => {
+      if (!firebaseConnected && firebaseEnabled) {
+        console.log('[Firebase] Tab became visible while disconnected, reconnecting');
+        forceReconnect(false);
+      }
+    }, 1500);
+  }
+});
+
+// 3. Network state — WiFi ↔ 4G switch, or coming back online
+window.addEventListener('online', () => {
+  console.log('[Firebase] Network online event, reconnecting');
+  setTimeout(() => forceReconnect(false), 500);
+});
+window.addEventListener('offline', () => {
+  console.log('[Firebase] Network offline event');
+  updateSyncBadge('offline');
+});
 
 function handleRemoteSnapshot(remote) {
   if (pendingFirstSnapshot) {
