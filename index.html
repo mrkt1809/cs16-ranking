@@ -1183,6 +1183,8 @@ function initFirebase() {
     setupFirebaseListeners();
     startConnectionWatchdog();
     firebaseInitDone = true;
+    // Force a fresh fetch via REST to bypass any cache on iOS Safari
+    fetchFreshFromServer();
   } catch (e) {
     console.error('[Firebase] Init failed:', e);
     updateSyncBadge('offline');
@@ -1320,6 +1322,9 @@ window.addEventListener('offline', () => {
 });
 
 function handleRemoteSnapshot(remote) {
+  console.log('[Firebase] Listener fire — lastUpdated:',
+    remote && remote.lastUpdated ? new Date(remote.lastUpdated).toLocaleTimeString() : '—',
+    '| pendingFirst:', pendingFirstSnapshot);
   if (pendingFirstSnapshot) {
     pendingFirstSnapshot = false;
     // First load — decide between using remote, or pushing local up
@@ -1341,6 +1346,18 @@ function handleRemoteSnapshot(remote) {
 
 function applyRemoteState(remote) {
   if (isApplyingRemoteUpdate) return;
+
+  // Timestamp guard: if remote is older than what we have, skip.
+  // This protects against stale snapshots from Firebase IndexedDB cache on iOS Safari.
+  if (remote && remote.lastUpdated != null && state.lastUpdated != null) {
+    if (Number(remote.lastUpdated) < Number(state.lastUpdated)) {
+      console.log('[Firebase] Ignoring stale snapshot (remote=' +
+        new Date(remote.lastUpdated).toLocaleTimeString() +
+        ', local=' + new Date(state.lastUpdated).toLocaleTimeString() + ')');
+      return;
+    }
+  }
+
   isApplyingRemoteUpdate = true;
   try {
     // Preserve local-only fields (draft, editingMatchIndex are per-device)
@@ -1360,11 +1377,16 @@ function applyRemoteState(remote) {
     // Cache to localStorage (so offline reads work)
     localStorage.setItem('cs16_v4', JSON.stringify(state));
 
+    console.log('[Firebase] APPLIED remote state (lastUpdated:',
+      state.lastUpdated ? new Date(state.lastUpdated).toLocaleTimeString() : '—',
+      '). Re-rendering...');
+
     // CRITICAL: always re-render leaderboard explicitly after remote update.
-    // Don't rely solely on rerenderActivePageAfterSync — on mobile Safari,
-    // querySelector('.tab.active') sometimes misses timing, causing the
-    // leaderboard to not refresh until user manually switches tabs.
+    // Use requestAnimationFrame to force paint on iOS Safari.
     renderLeaderboard();
+    if (typeof requestAnimationFrame === 'function') {
+      requestAnimationFrame(() => renderLeaderboard());
+    }
     rerenderActivePageAfterSync();
   } finally {
     isApplyingRemoteUpdate = false;
@@ -1405,14 +1427,48 @@ function pushToFirebase() {
   const dataToSync = { ...state };
   delete dataToSync.draft;
   delete dataToSync.editingMatchIndex;
+  // Stamp the write with a timestamp so we can detect stale snapshots
+  dataToSync.lastUpdated = Date.now();
+  state.lastUpdated = dataToSync.lastUpdated;
   updateSyncBadge('saving');
+  console.log('[Firebase] PUSH at', new Date(dataToSync.lastUpdated).toLocaleTimeString());
   firebaseDB.ref(FB_PATH).set(dataToSync)
-    .then(() => updateSyncBadge('synced'))
+    .then(() => {
+      console.log('[Firebase] ✓ PUSH success');
+      updateSyncBadge('synced');
+    })
     .catch(err => {
       console.error('[Firebase] Write failed:', err);
       updateSyncBadge('offline');
       showToast('⚠ Sync lỗi: ' + err.message, true);
     });
+}
+
+// ── FORCE FRESH FETCH ON INIT ──
+// iOS Safari sometimes serves stale Firebase data from IndexedDB cache.
+// REST API bypasses all caches and gets fresh data directly from server.
+// We call this once on init to guarantee fresh data on every page load.
+async function fetchFreshFromServer() {
+  const url = firebaseConfig.databaseURL + '/' + FB_PATH + '.json?_t=' + Date.now();
+  console.log('[Firebase] Fetching fresh via REST...');
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 6000);
+    const res = await fetch(url, { method: 'GET', cache: 'no-store', signal: controller.signal });
+    clearTimeout(timeoutId);
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+    if (data && data.players) {
+      console.log('[Firebase] ✓ Fresh data received (lastUpdated:',
+        data.lastUpdated ? new Date(data.lastUpdated).toLocaleTimeString() : '—', ')');
+      // Apply fresh data — overrides any stale listener cache
+      applyRemoteState(data);
+    } else {
+      console.log('[Firebase] Fresh fetch returned empty');
+    }
+  } catch (e) {
+    console.warn('[Firebase] Fresh fetch failed (will rely on listener):', e.message);
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────
