@@ -351,9 +351,9 @@ header{text-align:center;padding:24px 16px 14px;border-bottom:1px solid var(--bo
 /* MANAGE ROWS */
 .manage-row{
   display:grid;
-  grid-template-columns:36px 90px 1fr 110px 70px 38px;
+  grid-template-columns:32px 84px 1fr 86px 90px 60px 36px;
   align-items:center;
-  gap:10px;
+  gap:8px;
   padding:10px 14px;
   background:var(--panel);
   border:1px solid var(--border);
@@ -396,8 +396,8 @@ header{text-align:center;padding:24px 16px 14px;border-bottom:1px solid var(--bo
 }
 .manage-row .del-btn:hover{background:#3a1010;color:#fff;}
 .manage-header{
-  display:grid;grid-template-columns:36px 90px 1fr 110px 70px 38px;
-  gap:10px;padding:6px 14px;
+  display:grid;grid-template-columns:32px 84px 1fr 86px 90px 60px 36px;
+  gap:8px;padding:6px 14px;
   font-size:10px;letter-spacing:2px;color:var(--dim);
   text-transform:uppercase;font-weight:700;
 }
@@ -800,6 +800,9 @@ header{text-align:center;padding:24px 16px 14px;border-bottom:1px solid var(--bo
       <div class="step-counter">Chọn side, winner và nhập kill</div>
     </div>
     <div class="step-body">
+      <div style="text-align:center;margin-bottom:14px;">
+        <button class="action-btn" style="border-color:#5cb4ff;color:#5cb4ff;" onclick="openQuickFill()">📋 NHẬP NHANH KILL (dán từ scoreboard)</button>
+      </div>
       <div class="side-config">
         <span class="side-label">Team A side:</span>
         <div class="side-toggle">
@@ -925,6 +928,10 @@ header{text-align:center;padding:24px 16px 14px;border-bottom:1px solid var(--bo
       <div class="step-counter">Đã chọn: <b id="ts-count">0</b> người</div>
     </div>
     <div class="step-body">
+      <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;">
+        <button class="action-btn" style="padding:8px 16px;font-size:10px;min-height:38px;" onclick="selectAllParticipants()">✓ Chọn tất cả</button>
+        <button class="action-btn" style="padding:8px 16px;font-size:10px;min-height:38px;" onclick="resetParticipants()">✗ Bỏ chọn hết</button>
+      </div>
       <div class="roster-grid" id="ts-roster"></div>
       <div style="margin-top:14px;text-align:center;">
         <button class="submit-btn" id="ts-distribute-btn" onclick="distributeTeams()" disabled>⚡ CHIA TEAM TỰ ĐỘNG</button>
@@ -1114,6 +1121,33 @@ header{text-align:center;padding:24px 16px 14px;border-bottom:1px solid var(--bo
   </div>
 </div>
 
+<!-- ── MODAL: Quick Fill Kills (paste from scoreboard) ──────────────── -->
+<div class="modal-overlay" id="quickfill-modal" onclick="closeQuickFillIfBackdrop(event)">
+  <div class="modal-box">
+    <div class="modal-header">
+      <div class="modal-title">📋 NHẬP NHANH KILL</div>
+      <button class="modal-close" onclick="closeQuickFill()" title="Đóng">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="tier-info-box" style="margin-bottom:14px;">
+        <b>Cách dùng:</b><br>
+        1. Chọn team A/B trước (ở bước 2)<br>
+        2. <b>Cách nhanh:</b> 📷 Upload ảnh scoreboard → OCR tự đọc<br>
+        3. <b>Cách thủ công:</b> dán mỗi người 1 dòng <code>Tên KillR1 KillR2</code><br>
+        4. App tự match tên scoreboard → người trong hệ thống<br><br>
+        <b>💡 Mẹo map chuẩn 100%:</b> Gắn <b>mã số</b> cho mỗi người (tab Quản Lý) rồi đặt nickname kèm mã, vd <code>PHAO_1798</code> → app khớp theo mã, khỏi đoán tên.<br><br>
+        <b>Ví dụ:</b> <code>Bảo Long 18 12</code>
+      </div>
+
+      <textarea id="quickfill-input" placeholder="Bảo Long 18 12&#10;Hồng Minh 15 9&#10;..." style="width:100%;min-height:120px;background:#0f1320;border:1px solid var(--border);color:var(--text);font-family:'Share Tech Mono',monospace;font-size:13px;padding:10px;border-radius:4px;resize:vertical;"></textarea>
+      <div style="text-align:center;margin:12px 0;">
+        <button class="action-btn" onclick="parseQuickFill()">🔍 PHÂN TÍCH</button>
+      </div>
+      <div id="quickfill-result"></div>
+    </div>
+  </div>
+</div>
+
 <!-- ── MODAL: Login / Change Password ─────────────────────────────── -->
 <div class="modal-overlay" id="auth-modal" onclick="closeAuthIfBackdrop(event)">
   <div class="modal-box" style="max-width:480px;">
@@ -1141,6 +1175,12 @@ const firebaseConfig = {
   appId: "1:974153307071:web:2c6c17a17dc09ef614470a"
 };
 const FB_PATH = 'squad';
+
+// ═══════════════════════════════════════════════════════════════════
+//  PRODUCTION — sync đầy đủ với Firebase. (DEMO_MODE = false)
+// ═══════════════════════════════════════════════════════════════════
+const DEMO_MODE = false;
+const LS_KEY = DEMO_MODE ? 'cs16_v4_demo' : 'cs16_v4';
 
 let firebaseDB = null;
 let firebaseConnected = false;
@@ -1375,7 +1415,7 @@ function applyRemoteState(remote) {
     if (localEditing != null) state.editingMatchIndex = localEditing;
 
     // Cache to localStorage (so offline reads work)
-    localStorage.setItem('cs16_v4', JSON.stringify(state));
+    localStorage.setItem(LS_KEY, JSON.stringify(state));
 
     console.log('[Firebase] APPLIED remote state (lastUpdated:',
       state.lastUpdated ? new Date(state.lastUpdated).toLocaleTimeString() : '—',
@@ -1421,6 +1461,12 @@ function reloadManageNow() {
 }
 
 function pushToFirebase() {
+  if (DEMO_MODE) {
+    // Demo: never write to Firebase. Changes stay in local cache only.
+    console.log('[DEMO] Bỏ qua ghi Firebase — thay đổi chỉ lưu local');
+    updateSyncBadge('synced');
+    return;
+  }
   if (!firebaseEnabled || !firebaseDB) return;
   if (isApplyingRemoteUpdate) return;
   // Don't sync local-only fields
@@ -1552,13 +1598,14 @@ function sanitizePlayers(playersIn) {
       kills: typeof p.kills === 'number' ? p.kills : 0,
       matches: typeof p.matches === 'number' ? p.matches : 0,
       prevTier: (p.prevTier != null && [1,2,3,4].includes(Number(p.prevTier))) ? Number(p.prevTier) : null,
+      code: (p.code != null) ? String(p.code).trim() : '',
     };
   }
   return result;
 }
 function loadState() {
   try {
-    const raw = localStorage.getItem('cs16_v4');
+    const raw = localStorage.getItem(LS_KEY);
     if (raw) {
       const s = JSON.parse(raw);
       if (!s.auth) s.auth = { password: DEFAULT_ADMIN_PASSWORD };
@@ -1581,7 +1628,7 @@ function loadState() {
   };
 }
 function saveState() {
-  localStorage.setItem('cs16_v4', JSON.stringify(state));
+  localStorage.setItem(LS_KEY, JSON.stringify(state));
   // Also push to Firebase (if enabled and connected)
   pushToFirebase();
 }
@@ -2037,6 +2084,22 @@ function renderStatsInputs(round) {
     const containerId = `r${round}-inp-${tm}`;
     const el = document.getElementById(containerId);
     if (!el) return;
+
+    // Preserve currently-entered values before rebuilding the DOM.
+    // Without this, toggling a player (add/remove) would reset everyone's
+    // kills to 0 — the cause of "points reset to 0 when editing a match".
+    const prev = {};
+    [...set].forEach(id => {
+      const kEl  = document.getElementById(`r${round}-k-${tm}-${id}`);
+      const tkEl = document.getElementById(`r${round}-tk-${tm}-${id}`);
+      if (kEl || tkEl) {
+        prev[id] = {
+          k:  kEl ? kEl.value : '0',
+          tk: tkEl ? tkEl.checked : false
+        };
+      }
+    });
+
     if (!set.size) {
       el.innerHTML = '<div class="empty-state" style="padding:18px;font-size:11px;">Chưa chọn người chơi</div>';
       return;
@@ -2045,14 +2108,15 @@ function renderStatsInputs(round) {
       const p = state.players[id];
       const tCls = p.tier ? `t${p.tier}` : 't-empty';
       const tLab = p.tier ? p.tier : '—';
+      const saved = prev[id] || { k: '0', tk: false };
       return `
       <div class="player-input-row">
         <div class="pname-cell">
           <span class="tier-mini ${tCls}">${tLab}</span>
           <span class="pname-text">${p.name}</span>
         </div>
-        <input type="number" id="r${round}-k-${tm}-${id}" min="0" value="0" title="Kill round ${round}" onchange="renderSummary(); saveDraft();">
-        <input type="checkbox" class="topkill-cb" id="r${round}-tk-${tm}-${id}" onclick="onTopKillCheck(${round},'${tm}',${id})">
+        <input type="number" id="r${round}-k-${tm}-${id}" min="0" value="${saved.k}" title="Kill round ${round}" onchange="renderSummary(); saveDraft();">
+        <input type="checkbox" class="topkill-cb" id="r${round}-tk-${tm}-${id}" ${saved.tk ? 'checked' : ''} onclick="onTopKillCheck(${round},'${tm}',${id})">
       </div>`;
     }).join('');
   };
@@ -2074,6 +2138,146 @@ function onTopKillCheck(round, tm, id) {
 
 function getVal(id) { const e=document.getElementById(id); return e?parseInt(e.value)||0:0; }
 function getChk(id) { const e=document.getElementById(id); return e?e.checked:false; }
+
+// ─────────────────────────────────────────────────────────────────────
+//  QUICK FILL — paste scoreboard data, fuzzy-match names, fill kills
+// ─────────────────────────────────────────────────────────────────────
+let quickFillParsed = [];
+
+function openQuickFill() {
+  if (!selA.size && !selB.size) {
+    showToast('Hãy chọn người chơi cho 2 team trước!', true);
+    return;
+  }
+  document.getElementById('quickfill-input').value = '';
+  document.getElementById('quickfill-result').innerHTML = '';
+  quickFillParsed = [];
+  document.getElementById('quickfill-modal').classList.add('show');
+}
+function closeQuickFill() {
+  document.getElementById('quickfill-modal').classList.remove('show');
+}
+function closeQuickFillIfBackdrop(e) {
+  if (e.target.id === 'quickfill-modal') closeQuickFill();
+}
+
+// Normalize a string for fuzzy comparison: lowercase, strip accents & non-alphanumeric
+function normalizeStr(s) {
+  return (s || '').toLowerCase()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/đ/g, 'd')
+    .replace(/[^a-z0-9]/g, '');
+}
+
+// Match by embedded code first (most reliable), then fall back to name fuzzy match.
+// Players set their in-game nickname to include their code, e.g. "PHAO_1798" or "Bình_01".
+function matchByCode(nameText) {
+  // Extract digit sequences of length >= 2 (avoids single stray digits like the "1" in "s1mple")
+  const codes = (nameText.match(/\d{2,}/g) || []);
+  if (!codes.length) return null;
+  const selectedIds = [...selA, ...selB];
+  for (const c of codes) {
+    // Exact string match on code (so "01" matches "01" but not the "1" inside a nickname)
+    const p = selectedIds.map(id => state.players[id])
+      .find(p => p && p.code && String(p.code).trim() === c);
+    if (p) return p.id;
+  }
+  return null;
+}
+
+// Find best matching selected player for a scoreboard name
+function fuzzyMatchPlayer(name) {
+  // 1. Try code match first (reliable)
+  const byCode = matchByCode(name);
+  if (byCode != null) return byCode;
+  // 2. Fall back to fuzzy name match
+  const norm = normalizeStr(name);
+  if (!norm) return null;
+  const selectedIds = [...selA, ...selB];
+  const candidates = selectedIds.map(id => state.players[id]).filter(Boolean);
+  let m = candidates.find(p => normalizeStr(p.name) === norm);
+  if (m) return m.id;
+  m = candidates.find(p => {
+    const pn = normalizeStr(p.name);
+    return pn.includes(norm) || norm.includes(pn);
+  });
+  if (m) return m.id;
+  if (norm.length >= 4) {
+    m = candidates.find(p => normalizeStr(p.name).slice(0,4) === norm.slice(0,4));
+    if (m) return m.id;
+  }
+  return null;
+}
+
+function parseQuickFill() {
+  const raw = document.getElementById('quickfill-input').value;
+  const lines = raw.split('\n').map(l => l.trim()).filter(Boolean);
+  quickFillParsed = [];
+  for (const line of lines) {
+    // Split on whitespace / comma / tab / semicolon
+    const parts = line.split(/[\s,;\t]+/).filter(Boolean);
+    if (parts.length < 3) continue;
+    const r2 = parseInt(parts[parts.length - 1]);
+    const r1 = parseInt(parts[parts.length - 2]);
+    const name = parts.slice(0, parts.length - 2).join(' ');
+    if (isNaN(r1) || isNaN(r2)) continue;
+    quickFillParsed.push({ name, r1, r2, matchedId: fuzzyMatchPlayer(name) });
+  }
+  renderQuickFillResult();
+}
+
+function renderQuickFillResult() {
+  const el = document.getElementById('quickfill-result');
+  if (!quickFillParsed.length) {
+    el.innerHTML = '<div class="empty-state" style="padding:14px;">Chưa parse được dòng nào. Kiểm tra format: <code>Tên R1 R2</code></div>';
+    return;
+  }
+  const selectedIds = [...selA, ...selB];
+  const options = selectedIds.map(id => state.players[id]).filter(Boolean)
+    .sort((a,b)=>a.name.localeCompare(b.name,'vi'));
+
+  let html = '<div style="font-size:11px;color:var(--dim);margin-bottom:8px;letter-spacing:1px;">KẾT QUẢ PHÂN TÍCH — kiểm tra & sửa map nếu cần:</div>';
+  html += '<div style="display:flex;flex-direction:column;gap:6px;">';
+  quickFillParsed.forEach((row, idx) => {
+    const matched = row.matchedId != null;
+    const dropdown = `<select id="qf-map-${idx}" style="background:#0f1320;border:1px solid ${matched?'var(--border)':'#e05555'};color:var(--text);padding:6px;border-radius:4px;font-size:12px;max-width:140px;">
+      <option value="">— Bỏ qua —</option>
+      ${options.map(p => `<option value="${p.id}" ${p.id===row.matchedId?'selected':''}>${p.name}</option>`).join('')}
+    </select>`;
+    html += `<div style="display:flex;align-items:center;gap:8px;padding:6px 8px;background:${matched?'rgba(92,180,255,0.07)':'rgba(224,85,85,0.1)'};border-radius:4px;flex-wrap:wrap;">
+      <span style="flex:1;min-width:90px;font-family:'Share Tech Mono',monospace;font-size:12px;">${matched?'✓':'⚠'} ${row.name}</span>
+      <span style="font-size:11px;color:var(--dim);">R1:<b style="color:var(--gold);">${row.r1}</b> R2:<b style="color:var(--gold);">${row.r2}</b></span>
+      ${dropdown}
+    </div>`;
+  });
+  html += '</div>';
+  const unmatched = quickFillParsed.filter(r => r.matchedId == null).length;
+  if (unmatched > 0) {
+    html += `<div style="font-size:11px;color:#e05555;margin-top:8px;">⚠ ${unmatched} tên chưa map — chọn thủ công ở dropdown hoặc để "Bỏ qua".</div>`;
+  }
+  html += '<div style="text-align:center;margin-top:14px;"><button class="action-btn" onclick="applyQuickFill()">✅ ÁP DỤNG VÀO FORM</button></div>';
+  el.innerHTML = html;
+}
+
+function applyQuickFill() {
+  let applied = 0;
+  quickFillParsed.forEach((row, idx) => {
+    const sel = document.getElementById(`qf-map-${idx}`);
+    const pid = sel ? parseInt(sel.value) : NaN;
+    if (!pid || isNaN(pid)) return;
+    const tm = selA.has(pid) ? 'a' : (selB.has(pid) ? 'b' : null);
+    if (!tm) return;
+    const k1El = document.getElementById(`r1-k-${tm}-${pid}`);
+    const k2El = document.getElementById(`r2-k-${tm}-${pid}`);
+    if (k1El) k1El.value = row.r1;
+    if (k2El) k2El.value = row.r2;
+    applied++;
+  });
+  renderSummary();
+  saveDraft();
+  closeQuickFill();
+  showToast(`✓ Đã điền kill cho ${applied} người chơi`);
+}
 
 function saveDraft() {
   if (selA.size === 0 && selB.size === 0) {
@@ -2534,7 +2738,7 @@ function showToast(msg, isError=false) {
 function resetData() {
   if (!isAdmin) { showToast('Chỉ Admin mới reset được!', true); return; }
   if (!confirm('⚠ Reset TOÀN BỘ dữ liệu?\n\n• Toàn bộ người chơi\n• Toàn bộ lịch sử trận\n• Toàn bộ điểm\n• Mật khẩu Admin sẽ về default "cs16admin"\n• Data trên Firebase cũng bị xóa\n\nKHÔNG THỂ HOÀN TÁC! Nên Export Backup trước!')) return;
-  localStorage.removeItem('cs16_v4');
+  localStorage.removeItem(LS_KEY);
   sessionStorage.removeItem('cs16_admin');
   isAdmin = false;
   state = loadState();
@@ -3062,6 +3266,23 @@ function toggleParticipant(id) {
   renderTSRoster();
 }
 
+function selectAllParticipants() {
+  Object.values(state.players)
+    .filter(p => p && typeof p === 'object' && p.name)
+    .forEach(p => participantSet.add(p.id));
+  renderTSRoster();
+  showToast('✓ Đã chọn tất cả ' + participantSet.size + ' người');
+}
+
+function resetParticipants() {
+  participantSet.clear();
+  lastDistribution = null;
+  const resultCard = document.getElementById('ts-result-card');
+  if (resultCard) resultCard.style.display = 'none';
+  renderTSRoster();
+  showToast('✗ Đã bỏ chọn hết, chia lại từ đầu');
+}
+
 function playerScore(p) {
   const tierBonus = p.tier ? (5 - p.tier) * 50 : 0;
   return (p.points || 0) + tierBonus;
@@ -3205,10 +3426,14 @@ function renderManage() {
     .sort((a,b)=>a.id - b.id);
   const list = document.getElementById('manage-list');
   list.innerHTML = `
+    <div style="margin-bottom:10px;text-align:center;">
+      <button class="action-btn" style="padding:8px 16px;font-size:10px;min-height:38px;border-color:#5cb4ff;color:#5cb4ff;" onclick="autoGenerateCodes()">🔢 Tạo mã tự động (cho người chưa có)</button>
+    </div>
     <div class="manage-header">
       <div style="text-align:center;">STT</div>
       <div style="text-align:center;">TIER</div>
       <div>TÊN (click để sửa)</div>
+      <div style="text-align:center;">MÃ SỐ</div>
       <div style="text-align:center;">ĐIỂM</div>
       <div style="text-align:center;">TANKER</div>
       <div style="text-align:center;">XÓA</div>
@@ -3224,6 +3449,7 @@ function renderManage() {
         <option value="4" ${p.tier===4?'selected':''}>Tier 4</option>
       </select>
       <input type="text" class="name-input" id="mng-name-${p.id}" value="${escapeHtml(p.name)}" maxlength="40" title="Click để sửa tên">
+      <input type="text" id="mng-code-${p.id}" value="${escapeHtml(p.code||'')}" maxlength="8" placeholder="—" title="Mã số để map nickname" style="width:100%;background:#1a2030;border:1px solid var(--border);color:#5cb4ff;font-family:'Share Tech Mono',monospace;font-size:13px;padding:9px 6px;outline:none;text-align:center;font-weight:700;min-height:38px;">
       <input type="number" id="mng-pts-${p.id}" min="0" value="${p.points}">
       <div class="tanker-toggle">
         <input type="checkbox" id="mng-tank-${p.id}" ${p.tanker?'checked':''}>
@@ -3231,6 +3457,31 @@ function renderManage() {
       <button class="del-btn" onclick="deletePlayer(${p.id})" title="Xóa người chơi">🗑</button>
     </div>
   `).join('');
+}
+
+// Auto-generate unique 4-digit codes for players that don't have one yet
+function autoGenerateCodes() {
+  const used = new Set(
+    Object.values(state.players)
+      .filter(p => p && p.code)
+      .map(p => String(p.code))
+  );
+  let generated = 0;
+  Object.values(state.players).forEach(p => {
+    if (!p || (p.code && String(p.code).trim())) return;
+    let code;
+    do { code = String(Math.floor(1000 + Math.random() * 9000)); } while (used.has(code));
+    used.add(code);
+    p.code = code;
+    generated++;
+  });
+  if (generated === 0) {
+    showToast('Tất cả người chơi đã có mã số rồi');
+    return;
+  }
+  saveState();
+  renderManage();
+  showToast(`✓ Đã tạo mã cho ${generated} người chơi`);
 }
 
 function escapeHtml(s) {
@@ -3296,9 +3547,11 @@ function saveManageChanges() {
     const ptsEl = document.getElementById(`mng-pts-${p.id}`);
     const tankEl = document.getElementById(`mng-tank-${p.id}`);
     const tierEl = document.getElementById(`mng-tier-${p.id}`);
+    const codeEl = document.getElementById(`mng-code-${p.id}`);
     if (proposed[p.id]) p.name = proposed[p.id];
     if (ptsEl) p.points = Math.max(0, parseInt(ptsEl.value) || 0);
     if (tankEl) p.tanker = tankEl.checked;
+    if (codeEl) p.code = codeEl.value.trim();
     if (tierEl) {
       const v = tierEl.value;
       p.tier = v === '' ? null : parseInt(v);
